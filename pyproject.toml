@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spars"
+version = "2.0.0"
+description = "SPARS: an HPC scheduling and power-management simulator with reinforcement-learning support."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+
+dependencies = [
+    "gymnasium",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "psutil",
+    "PyYAML",
+    "scipy",
+    "SciencePlots",
+    "textual",
+    "torch",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ipykernel",
+    "ipython",
+    "pytest",
+]
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = [
+    "spars",
+    "spars.*",
+]
+namespaces = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
