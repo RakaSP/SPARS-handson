@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Cross-platform SPARS setup.
 
-Creates/recreates ./SPARS-venv, installs the best available PyTorch build for
-this machine, installs the project in editable mode with dev tools, and
-verifies the resulting environment.
+Creates/recreates ./SPARS-venv, optionally installs the best available PyTorch
+build for this machine, installs the project in editable mode with dev tools,
+and verifies the resulting environment.
+
+At startup the installer asks "Install torch? [Y/n]". Answering "n" builds the
+environment without PyTorch (everything else in pyproject.toml is still
+installed). Use --torch / --no-torch to skip the prompt.
 
 The installer itself intentionally uses Python 3.8-compatible syntax so it can
 run under an older interpreter long enough to locate a Python version that
@@ -32,6 +36,7 @@ PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 VENV = PROJECT_ROOT / "SPARS-venv"
 PYTORCH_ROOT = "https://download.pytorch.org/whl/"
 VIRTUALENV_BOOTSTRAP = "https://bootstrap.pypa.io/virtualenv.pyz"
+PROJECT_NAME = "spars"
 
 
 class ChannelParser(HTMLParser):
@@ -56,6 +61,40 @@ class ChannelParser(HTMLParser):
 
 def say(message=""):
     print(message, flush=True)
+
+
+def ask_yes_no(question, default=True):
+    """Ask a Y/n question. Returns default on empty input, EOF or no TTY."""
+    suffix = " [Y/n] " if default else " [y/N] "
+    if not sys.stdin or not sys.stdin.isatty():
+        say("%s%s(non-interactive, using default: %s)"
+            % (question, suffix, "yes" if default else "no"))
+        return default
+    while True:
+        try:
+            answer = input(question + suffix).strip().lower()
+        except EOFError:
+            say()
+            return default
+        if not answer:
+            return default
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        say("Please answer 'y' or 'n'.")
+
+
+def decide_install_torch():
+    """Resolve whether to install torch from CLI flags or an interactive prompt."""
+    args = sys.argv[1:]
+    if "--no-torch" in args:
+        say("Install torch? -> no (--no-torch)")
+        return False
+    if "--torch" in args or "--yes" in args or "-y" in args:
+        say("Install torch? -> yes (--torch)")
+        return True
+    return ask_yes_no("Install torch?", default=True)
 
 
 def format_command(command):
@@ -604,10 +643,49 @@ def install_project(python, torch_version, numpy_version):
                 pass
 
 
+def project_requirements_without_torch(python):
+    """Read the installed project's requirements (base + dev extra), minus torch."""
+    script = (
+        "import importlib.metadata as m\n"
+        "for r in (m.requires(%r) or []):\n"
+        "    print(r)\n" % PROJECT_NAME
+    )
+    result = run([python, "-c", script], capture=True)
+    requirements = []
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        requirement, _sep, marker = line.partition(";")
+        requirement = requirement.strip()
+        marker = marker.strip()
+        if re.match(r"^torch(?![A-Za-z0-9_.-])", requirement, flags=re.IGNORECASE):
+            continue
+        if "extra" in marker:
+            # Keep only the dev extra, which this installer always installs.
+            if not re.search(r"extra\s*==\s*['\"]dev['\"]", marker):
+                continue
+        elif marker:
+            requirement = requirement + "; " + marker
+        requirements.append(requirement)
+    return requirements
+
+
+def install_project_without_torch(python):
+    # --no-deps keeps pip from resolving the "torch" dependency in pyproject.toml.
+    run([python, "-m", "pip", "install", "--no-deps", "-e", "."], cwd=PROJECT_ROOT)
+    requirements = project_requirements_without_torch(python)
+    if requirements:
+        run([python, "-m", "pip", "install"] + requirements)
+
+
 def verify_project(python, expected_backend):
     script = r'''
 import importlib
 import sys
+
+backend = sys.argv[1]
+no_torch = backend == "none"
 
 modules = [
     "gymnasium",
@@ -619,11 +697,19 @@ modules = [
     "scipy",
     "scienceplots",
     "textual",
-    "torch",
-    "spars",
 ]
+if not no_torch:
+    modules += ["torch", "spars"]
 for name in modules:
     importlib.import_module(name)
+
+if no_torch:
+    try:
+        importlib.import_module("spars")
+    except ImportError as error:
+        print("note: spars imported with missing optional dependency: %s" % error)
+    print("verification-ok")
+    sys.exit(0)
 
 import numpy as np
 import torch
@@ -631,7 +717,6 @@ x = torch.tensor([1.0, 2.0])
 a = x.numpy()
 assert isinstance(a, np.ndarray) and float(a.sum()) == 3.0
 
-backend = sys.argv[1]
 if backend == "cuda":
     assert torch.cuda.is_available() and torch.version.cuda and not torch.version.hip
     assert (torch.ones(2, device="cuda") + 1).sum().item() == 4.0
@@ -665,12 +750,26 @@ def main():
     say("Platform: %s %s" % (platform.system() or sys.platform, machine))
     say("Accelerator: %s" % describe_accelerators())
 
+    want_torch = decide_install_torch()
+
     minimum = parse_project_min_python()
     python_version, base_python = find_compatible_python(minimum)
     say(
         "Python: %s (%s)"
         % (format_command(base_python), ".".join(map(str, python_version)))
     )
+
+    if not want_torch:
+        say("\nSkipping PyTorch; installing the project without it")
+        python = create_venv(base_python)
+        install_project_without_torch(python)
+        verify_project(python, "none")
+        say("\nSetup complete.")
+        say("Environment: %s" % VENV)
+        say("Backend: none (torch not installed)")
+        say("Note: parts of SPARS that need torch (RL training/agents) will not work.")
+        say("Activate: %s" % activation_hint())
+        return
 
     channels = discover_pytorch_channels()
     if channels:
